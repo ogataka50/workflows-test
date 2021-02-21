@@ -1,0 +1,96 @@
+main:
+  params: [args]
+  steps:
+    - reserveStock:
+        try:
+          call: http.post
+          args:
+            url: https://STOCK_SERVICE_URL/reserve
+            body:
+              "unit": ${args.unit}
+              "unstable": ${args.unstable}
+            auth:
+              type: OIDC
+            timeout: 10
+          result: reserveStockResult
+        retry:
+          predicate: ${custom_predicate}
+          max_retries: 10
+          backoff:
+            initial_delay: 1
+            max_delay: 3
+            multiplier: 2
+    - switchByReserveStock:
+        switch:
+          - condition: ${reserveStockResult.body.status == "reserved"}
+            next: authorizePayment
+        next: voidOrder
+    - authorizePayment:
+        try:
+          call: http.post
+          args:
+            url: https://PAYMENT_SERVICE_URL/authorize
+            body:
+              "price": ${args.price}
+              "unstable": ${args.unstable}
+            auth:
+              type: OIDC
+          result: authorizePaymentResult
+        retry:
+          predicate: ${custom_predicate}
+          max_retries: 10
+          backoff:
+            initial_delay: 1
+            max_delay: 3
+            multiplier: 2
+    - switchByAuthorizePayment:
+        switch:
+          - condition: ${authorizePaymentResult.body.status == "authorized"}
+            next: updateOrder
+        next: cancelReservedStock
+    - updateOrder:
+        try:
+          call: http.post
+          args:
+            url: https://ORDER_SERVICE_URL/update
+            auth:
+              type: OIDC
+          result: updateOrderResult
+        retry:
+          predicate: ${custom_predicate}
+          max_retries: 10
+          backoff:
+            initial_delay: 1
+            max_delay: 3
+            multiplier: 2
+        next: finish
+    - cancelReservedStock:
+        call: http.post
+        args:
+          url: https://STOCK_SERVICE_URL/cancelReserve
+          auth:
+            type: OIDC
+        result: cancelReservedStockResult
+        next: voidOrder
+    - voidOrder:
+        call: http.post
+        args:
+          url: https://ORDER_SERVICE_URL/void
+          auth:
+            type: OIDC
+        result: voidOrderResult
+        next: finish
+    - finish:
+        return: ${reserveStockResult.body}
+
+
+
+custom_predicate:
+  params: [e]
+  steps:
+    - what_to_repeat:
+        switch:
+          - condition: ${e.code == 500}
+            return: True
+    - otherwise:
+        return: False
